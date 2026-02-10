@@ -1,0 +1,6 @@
+.env
+tokens.json
+tracker.db
+__pycache__/
+*.pyc
+.venv/
