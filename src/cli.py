@@ -141,23 +141,48 @@ def cmd_draft(args):
         print("  GEMINI_API_KEY=your_key_here", file=sys.stderr)
         print("  Get one at: https://aistudio.google.com/apikey", file=sys.stderr)
         sys.exit(1)
-    print(f"Generating draft about: {args.topic}")
+
+    prompt = args.prompt
+    print(f"Generating post from prompt: {prompt}")
     if args.category:
         print(f"Category: {args.category}")
     print()
+
     try:
-        text = draft_post(topic=args.topic, category=args.category, tone=args.tone, max_words=args.words)
+        text = draft_post(topic=prompt, category=args.category, tone=args.tone, max_words=args.words)
     except RuntimeError as e:
         print(f"✗ {e}", file=sys.stderr); sys.exit(1)
+
     print("─" * 60)
     print(text)
     print("─" * 60)
     print()
-    _save_draft(text, args.category or "uncategorized", args.topic)
-    print("Next steps:")
-    print("  Refine:    python -m src.cli refine -f 'make it more personal'")
-    print("  Post now:  python -m src.cli draft-post")
-    print("  Schedule:  python -m src.cli draft-post --at '2026-02-11 09:00'")
+
+    _save_draft(text, args.category or "uncategorized", prompt)
+
+    if args.post:
+        # Post immediately
+        category = args.category or "uncategorized"
+        try:
+            post_urn = create_text_post(text=text)
+            post_id = save_post(linkedin_urn=post_urn, category_name=category, content_preview=text)
+            print(f"✓ Posted to LinkedIn! URN: {post_urn}")
+            print(f"  Tracked locally (id={post_id}, category='{category}')")
+        except RuntimeError as e:
+            print(f"✗ {e}", file=sys.stderr); sys.exit(1)
+    elif args.schedule:
+        category = args.category or "uncategorized"
+        try:
+            scheduled_time = _parse_datetime(args.schedule)
+        except ValueError as e:
+            print(f"✗ {e}", file=sys.stderr); sys.exit(1)
+        sid = schedule_post(content=text, category_name=category, scheduled_for=scheduled_time.isoformat())
+        print(f"✓ Scheduled as #{sid} for {scheduled_time.strftime('%Y-%m-%d %H:%M')}")
+    else:
+        print("Next steps:")
+        print("  Refine:    python -m src.cli refine -f 'make it more personal'")
+        print("  Post now:  python -m src.cli draft-post")
+        print("  Schedule:  python -m src.cli draft-post --at '2026-02-11 09:00'")
 
 
 def cmd_refine(args):
@@ -339,6 +364,40 @@ def cmd_collect(args):
     print(f"\nCollected for {success}/{len(posts)} posts.")
 
 
+def cmd_scrape(args):
+    try:
+        from src.api.scraper import scrape_all_tracked_posts
+    except ImportError:
+        print("✗ selenium is not installed. Run:", file=sys.stderr)
+        print("  pip install selenium", file=sys.stderr)
+        sys.exit(1)
+
+    init_db()
+    posts = list_posts(limit=100)
+    if not posts:
+        print("No tracked posts to scrape. Track some first with 'track' or 'post'."); return
+
+    results = scrape_all_tracked_posts(posts, headless=args.headless)
+
+    if not results:
+        print("\nNo stats collected."); return
+
+    saved = 0
+    for r in results:
+        sid = save_metrics(
+            linkedin_urn=r["linkedin_urn"],
+            impressions=r["impressions"],
+            reactions=r["reactions"],
+            comments=r["comments"],
+            shares=r["reposts"],
+        )
+        if sid:
+            saved += 1
+
+    print(f"\n✓ Saved metrics for {saved}/{len(results)} posts.")
+    print("  Run 'python -m src.cli stats' to see category performance.")
+
+
 def cmd_stats(args):
     init_db()
     stats = get_category_stats()
@@ -391,9 +450,13 @@ def main():
     p.add_argument("--reactions", type=int, default=0); p.add_argument("--comments", type=int, default=0)
     p.add_argument("--shares", type=int, default=0); p.add_argument("--clicks", type=int, default=0)
 
-    p = sub.add_parser("draft", help="Generate a post draft with AI")
-    p.add_argument("--topic", required=True); p.add_argument("--category", "-c")
-    p.add_argument("--tone"); p.add_argument("--words", type=int)
+    p = sub.add_parser("draft", help="Generate a LinkedIn post with AI and optionally publish it")
+    p.add_argument("prompt", help="Describe what you want the post to be about")
+    p.add_argument("--category", "-c", help="Content category")
+    p.add_argument("--tone", help="Tone: professional, casual, storytelling, provocative, educational")
+    p.add_argument("--words", type=int, help="Target word count")
+    p.add_argument("--post", action="store_true", help="Immediately post to LinkedIn")
+    p.add_argument("--schedule", help="Schedule for later: 'YYYY-MM-DD HH:MM'")
 
     p = sub.add_parser("refine", help="Refine the last AI draft")
     p.add_argument("--feedback", "-f", required=True)
@@ -432,6 +495,9 @@ def main():
     p = sub.add_parser("collect", help="Auto-collect analytics from LinkedIn API")
     p.add_argument("--days", "-d", type=int, default=30)
 
+    p = sub.add_parser("scrape", help="Scrape stats for all tracked posts via Chrome")
+    p.add_argument("--headless", action="store_true", help="Run Chrome without a visible window")
+
     sub.add_parser("stats", help="Show performance stats by category")
 
     p = sub.add_parser("detail", help="Show per-post metrics")
@@ -440,7 +506,7 @@ def main():
     args = parser.parse_args()
     if not args.command: parser.print_help(); sys.exit(0)
 
-    cmds = {"auth":cmd_auth,"status":cmd_status,"post":cmd_post,"track":cmd_track,"draft":cmd_draft,"refine":cmd_refine,"draft-post":cmd_draft_post,"schedule":cmd_schedule,"queue":cmd_queue,"cancel":cmd_cancel,"publish-due":cmd_publish_due,"posts":cmd_posts,"categories":cmd_categories,"fetch-posts":cmd_fetch_posts,"log-metrics":cmd_log_metrics,"collect":cmd_collect,"stats":cmd_stats,"detail":cmd_detail}
+    cmds = {"auth":cmd_auth,"status":cmd_status,"post":cmd_post,"track":cmd_track,"draft":cmd_draft,"refine":cmd_refine,"draft-post":cmd_draft_post,"schedule":cmd_schedule,"queue":cmd_queue,"cancel":cmd_cancel,"publish-due":cmd_publish_due,"posts":cmd_posts,"categories":cmd_categories,"fetch-posts":cmd_fetch_posts,"log-metrics":cmd_log_metrics,"collect":cmd_collect,"scrape":cmd_scrape,"stats":cmd_stats,"detail":cmd_detail}
     cmds[args.command](args)
 
 if __name__ == "__main__":
