@@ -45,6 +45,19 @@ CREATE TABLE IF NOT EXISTS metrics_snapshots (
     follower_gains  INTEGER DEFAULT 0,
     FOREIGN KEY (post_id) REFERENCES posts(id)
 );
+
+CREATE TABLE IF NOT EXISTS scheduled_posts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    content         TEXT NOT NULL,
+    category_name   TEXT NOT NULL,
+    article_url     TEXT,
+    visibility      TEXT DEFAULT 'PUBLIC',
+    scheduled_for   TEXT NOT NULL,
+    status          TEXT DEFAULT 'pending',
+    linkedin_urn    TEXT,
+    error_message   TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -252,3 +265,78 @@ def get_posts_with_metrics(category_name: str | None = None, limit: int = 20) ->
 
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
+
+
+# --- Scheduling ---
+
+def schedule_post(content: str, category_name: str, scheduled_for: str,
+                  article_url: str | None = None, visibility: str = "PUBLIC") -> int:
+    """
+    Save a post to be published later.
+
+    Args:
+        scheduled_for: ISO format datetime string (e.g., "2026-02-11T09:00:00")
+
+    Returns the scheduled post ID.
+    """
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO scheduled_posts
+               (content, category_name, article_url, visibility, scheduled_for)
+               VALUES (?, ?, ?, ?, ?)""",
+            (content, category_name, article_url, visibility, scheduled_for),
+        )
+        return cursor.lastrowid
+
+
+def get_due_posts() -> list[dict]:
+    """Get all pending scheduled posts that are due for publishing."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM scheduled_posts
+               WHERE status = 'pending' AND scheduled_for <= datetime('now')
+               ORDER BY scheduled_for ASC""",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_published(scheduled_id: int, linkedin_urn: str):
+    """Mark a scheduled post as published."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET status = 'published', linkedin_urn = ? WHERE id = ?",
+            (linkedin_urn, scheduled_id),
+        )
+
+
+def mark_failed(scheduled_id: int, error: str):
+    """Mark a scheduled post as failed."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET status = 'failed', error_message = ? WHERE id = ?",
+            (error, scheduled_id),
+        )
+
+
+def list_scheduled(include_done: bool = False) -> list[dict]:
+    """List scheduled posts."""
+    with get_db() as conn:
+        if include_done:
+            rows = conn.execute(
+                "SELECT * FROM scheduled_posts ORDER BY scheduled_for ASC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM scheduled_posts WHERE status = 'pending' ORDER BY scheduled_for ASC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_scheduled(scheduled_id: int) -> bool:
+    """Delete a pending scheduled post."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM scheduled_posts WHERE id = ? AND status = 'pending'",
+            (scheduled_id,),
+        )
+        return cursor.rowcount > 0
